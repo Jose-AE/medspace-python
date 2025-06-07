@@ -1,79 +1,73 @@
 from flask import Flask, jsonify
-from sklearn.linear_model import LinearRegression
-from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import OneHotEncoder
-from sklearn.pipeline import make_pipeline
 import pandas as pd
-import threading
-import time
+from sklearn.linear_model import LinearRegression
+from .models.price_predictor import PricePredictor
+from flask import request
+from datetime import datetime, timedelta
 
-# Read training data
-df = pd.read_csv("data/training_data.csv")
-df["address_zip"] = df["address_zip"].astype(str).str.zfill(5)
-
-# Read prediction data
-prediction_data_df = pd.read_csv("data/predict_data.csv")
-prediction_data_df["address_zip"] = prediction_data_df["address_zip"].astype(str).str.zfill(5)
-prediction_data = prediction_data_df.iloc[0].to_dict()
-zip_code = prediction_data["address_zip"]
-size = prediction_data["size"]
-
-# Filter by exact zip code
-filtered_df = df[df["address_zip"] == zip_code]
-group_info = f"Código postal exacto: {zip_code}"
-
-# If there is no coincidence, search by prefix (group by mayoralty)
-if filtered_df.empty:
-    prefix = zip_code[:2] if len(zip_code) >= 2 else zip_code[0]
-    group_info = f"Prefijo de alcaldía (2 dígitos): {prefix}XXX"
-    filtered_df = df[df["address_zip"].str.startswith(prefix)]
-
-# Verify if there is data
-if filtered_df.empty:
-    result = {"error": f"No hay datos disponibles para el código postal {zip_code} ni su zona."}
-else:
-    # Prepare data for training
-    X = filtered_df[["address_zip", "size"]]
-    y = filtered_df["rental_price"]
-
-    # Preprocessing
-    preprocessor = ColumnTransformer(
-        transformers=[
-            ("zip_encoder", OneHotEncoder(handle_unknown="ignore"), ["address_zip"]),
-            ("passthrough", "passthrough", ["size"])
-        ]
-    )
-
-    # Create pipeline and train model
-    model = make_pipeline(preprocessor, LinearRegression())
-    model.fit(X, y)
-
-    # Input data for prediction
-    input_df = pd.DataFrame([{
-        "address_zip": zip_code,
-        "size": size
-    }])
-
-    # Make prediction
-    raw_prediction = model.predict(input_df)[0]
-    prediction = max(0, round(raw_prediction, 2))
-
-    result = {"PrecioIdeal": round(prediction, 2)}
-
-# Show in console
-print("Enviando datos al modelo:", prediction_data)
-print("Respuesta recibida:", result)
 
 # Create Flask API
 app = Flask(__name__)
 
-@app.route("/", methods=["GET"])
-def get_result():
+
+@app.route("/predict_earnings", methods=["POST"])
+def predict_earnings():
+    try:
+        # Recibir datos del backend
+        data = request.get_json()
+
+        # Validar estructura
+        if not isinstance(data, list) or not all("amount" in item and "paymentDate" in item for item in data):
+            return jsonify({"error": "Formato inválido. Se esperaba lista de objetos con 'amount' y 'paymentDate'."}), 400
+
+        # Convertir a DataFrame
+        df = pd.DataFrame(data)
+        df["fecha_ordinal"] = pd.to_datetime(df["paymentDate"]).map(datetime.toordinal)
+        X = df[["fecha_ordinal"]]
+        y = df["amount"]
+
+        # Entrenar modelo
+        model = LinearRegression()
+        model.fit(X, y)
+
+        # Predecir próximos 7 días
+        last_date = pd.to_datetime(df["paymentDate"]).max()
+        future_dates = [last_date + timedelta(days=i) for i in range(1, 8)]
+        future_ordinals = [[d.toordinal()] for d in future_dates]
+        predictions = model.predict(future_ordinals)
+
+        # Preparar respuesta
+        result = [{"date": d.strftime("%Y-%m-%d"), "predictedAmount": round(pred, 2)} for d, pred in zip(future_dates, predictions)]
+
+        return jsonify(result)
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/predict_price", methods=["GET"])
+def predict_price():
+    zip_code = request.args.get("zip_code", "01000")
+    size = int(request.args.get("size", 1000))
+
+    model = PricePredictor()
+    result = model.predict(zip_code=zip_code, size=size)
+
     return jsonify(result)
+
+
+@app.route("/predict_price/train", methods=["GET"])
+def train():
+    model = PricePredictor()
+    model.train()
+
+    return jsonify({"message": "Model trained successfully"})
+
 
 @app.route("/health", methods=["GET"])
 def health_check():
     return jsonify({"status": "healthy"})
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080, debug=False)
