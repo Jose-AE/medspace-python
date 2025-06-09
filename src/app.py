@@ -4,10 +4,12 @@ from sklearn.linear_model import LinearRegression
 from .models.price_predictor import PricePredictor
 from flask import request
 from datetime import datetime, timedelta
+from flask_cors import CORS
 
 
 # Create Flask API
 app = Flask(__name__)
+CORS(app, origins="*")
 
 
 @app.route("/predict_earnings", methods=["POST"])
